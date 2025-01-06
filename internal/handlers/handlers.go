@@ -1,10 +1,12 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/jcsawyer123/simple-go-api/internal/auth"
@@ -18,15 +20,38 @@ const (
 )
 
 type Handlers struct {
-	auth   *auth.Client
-	health *health.HealthManager
+	auth    *auth.Client
+	health  *health.HealthManager
+	bufPool *sync.Pool // buffer pool for JSON encoding
 }
 
 func New(auth *auth.Client, health *health.HealthManager) *Handlers {
 	return &Handlers{
 		auth:   auth,
 		health: health,
+		bufPool: &sync.Pool{
+			New: func() interface{} {
+				return new(bytes.Buffer)
+			},
+		},
 	}
+}
+
+func (h *Handlers) writeJSON(w http.ResponseWriter, status int, v interface{}) error {
+	buf := h.bufPool.Get().(*bytes.Buffer)
+	defer func() {
+		buf.Reset()
+		h.bufPool.Put(buf)
+	}()
+
+	if err := json.NewEncoder(buf).Encode(v); err != nil {
+		return err
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, err := w.Write(buf.Bytes())
+	return err
 }
 
 func (h *Handlers) HealthCheck(w http.ResponseWriter, r *http.Request) {
@@ -41,24 +66,25 @@ func (h *Handlers) HealthCheck(w http.ResponseWriter, r *http.Request) {
 		"version": "1.0.0",
 	}
 
+	statusCode := http.StatusOK
 	if !isHealthy {
-		w.WriteHeader(http.StatusServiceUnavailable)
+		statusCode = http.StatusServiceUnavailable
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	if err := h.writeJSON(w, statusCode, response); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
 }
 
-func (h *Handlers) GetData(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) GetData(w http.ResponseWriter, r *http.Request, buf *bytes.Buffer) {
 	response := map[string]interface{}{
 		"message":   "data endpoint",
 		"timestamp": time.Now().UTC(),
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	if err := h.writeJSON(w, http.StatusOK, response); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
 }
 
 type TestPermissionsResponse struct {
@@ -67,51 +93,39 @@ type TestPermissionsResponse struct {
 }
 
 func (h *Handlers) TestPermissions(w http.ResponseWriter, r *http.Request) {
-	// Get the token from the context using the proper context key
 	token, ok := r.Context().Value(tokenCtxKey).(string)
-	// log r.Context() possible values
-	print(r.Context())
-
 	if !ok {
 		http.Error(w, "Internal server error - No token in context", http.StatusInternalServerError)
 		return
 	}
 
-	// Test for the specific permission
 	err := h.auth.ValidatePermissions(r.Context(), token, "*:managed:*:*")
-
 	response := TestPermissionsResponse{
 		HasPermission: err == nil,
 		Message:       "Permission check completed",
 	}
-
 	if err != nil {
 		response.Message = fmt.Sprintf("Permission denied: %v", err)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(response); err != nil {
+	if err := h.writeJSON(w, http.StatusOK, response); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
-		return
 	}
 }
 
 func (h *Handlers) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Get token from x-aims-auth-token header
 		token := r.Header.Get("x-aims-auth-token")
 		if token == "" {
 			http.Error(w, "Unauthorized - No token provided", http.StatusUnauthorized)
 			return
 		}
 
-		// Validate the token
 		if err := h.auth.ValidateToken(r.Context(), token); err != nil {
 			http.Error(w, "Unauthorized - Invalid token", http.StatusUnauthorized)
 			return
 		}
 
-		// Set token in context using the defined context key
 		ctx := context.WithValue(r.Context(), tokenCtxKey, token)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

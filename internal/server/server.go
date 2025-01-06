@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -20,63 +22,80 @@ type Server struct {
 	httpServer *http.Server
 	auth       *auth.Client
 	health     *health.HealthManager
+	bufPool    *sync.Pool
 }
 
 func New(cfg *config.Config) (*Server, error) {
+
+	// Create a buffer pool
+	bufPool := &sync.Pool{
+		New: func() interface{} {
+			return new(bytes.Buffer)
+		},
+	}
+
+	// Initialize the auth client
 	authClient, err := auth.NewClient(cfg.AuthServiceURL)
 	if err != nil {
 		return nil, fmt.Errorf("creating auth client: %w", err)
 	}
 
-	// Create health manager with 5-minute check interval
+	// Initialize the health manager
 	healthManager := health.NewHealthManager(5 * time.Minute)
-
-	// Register health checks
 	healthManager.RegisterChecker("auth", authClient)
 
+	// Initialize the router
 	r := chi.NewRouter()
 
-	// Middleware
-	r.Use(middleware.Logger)
+	r.Use(middleware.RealIP)
+	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
+	r.Use(middleware.Logger)
 
 	h := handlers.New(authClient, healthManager)
 
-	// Routes
 	r.Get("/health", h.HealthCheck)
 	r.Route("/api", func(r chi.Router) {
 		r.Use(h.AuthMiddleware)
-		r.Get("/data", h.GetData)
+		r.Get("/data", func(w http.ResponseWriter, r *http.Request) {
+			buf := bufPool.Get().(*bytes.Buffer)
+			defer bufPool.Put(buf)
+			buf.Reset()
 
-		// Routes requiring specific permissions
+			h.GetData(w, r, buf)
+		})
+
 		r.Route("/perms", func(r chi.Router) {
-			r.Use(h.RequirePermissionsMiddleware("*:test:*:*"))
+			r.Use(h.RequirePermissionsMiddleware("*:managed:*:*"))
 			r.Get("/test", h.TestPermissions)
 		})
 
-		// Route without additional permission requirements
-		r.With(h.RequirePermissionsMiddleware("*:managed:*:*")).Get("/test", h.TestPermissions)
-
+		r.With(h.RequirePermissionsMiddleware("*:managed:*:*")).
+			Get("/test", h.TestPermissions)
 	})
 
 	return &Server{
 		httpServer: &http.Server{
-			Addr:    ":" + cfg.Port,
-			Handler: r,
+			Addr:              ":" + cfg.Port,
+			Handler:           r,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       120 * time.Second,
+			ReadHeaderTimeout: 2 * time.Second,
+			MaxHeaderBytes:    1 << 20,
 		},
-		auth:   authClient,
-		health: healthManager,
+		auth:    authClient,
+		health:  healthManager,
+		bufPool: bufPool,
 	}, nil
 }
 
 func (s *Server) Start(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 
-	// Start health checks
 	s.health.StartChecks(ctx)
 
-	// Start HTTP server
 	g.Go(func() error {
 		if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
 			return fmt.Errorf("http server error: %w", err)
@@ -84,7 +103,6 @@ func (s *Server) Start(ctx context.Context) error {
 		return nil
 	})
 
-	// Handle graceful shutdown
 	g.Go(func() error {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

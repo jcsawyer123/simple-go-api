@@ -7,7 +7,6 @@ import (
 	"strings"
 )
 
-// TokenInfo represents the structure of the token validation response
 type TokenInfo struct {
 	Roles []Role `json:"roles"`
 }
@@ -44,6 +43,38 @@ func ParsePermission(perm string) (*Permission, error) {
 	}, nil
 }
 
+// generateCascadingPermissions generates all possible less specific permissions
+// For example: "compute:managed:list:prod" would generate:
+// ["compute:managed:list:prod", "compute:managed:list:*", "compute:managed:*:*", "compute:*:*:*", "*:*:*:*"]
+func (p *Permission) generateCascadingPermissions() []string {
+	var perms []string
+
+	// Add the original permission
+	perms = append(perms, fmt.Sprintf("%s:%s:%s:%s", p.Service, p.Resource, p.Action, p.Qualifier))
+
+	// Add cascading qualifier
+	if p.Qualifier != "*" {
+		perms = append(perms, fmt.Sprintf("%s:%s:%s:*", p.Service, p.Resource, p.Action))
+	}
+
+	// Add cascading action
+	if p.Action != "*" {
+		perms = append(perms, fmt.Sprintf("%s:%s:*:*", p.Service, p.Resource))
+	}
+
+	// Add cascading resource
+	if p.Resource != "*" {
+		perms = append(perms, fmt.Sprintf("%s:*:*:*", p.Service))
+	}
+
+	// Add fully wildcarded permission
+	if p.Service != "*" {
+		perms = append(perms, "*:*:*:*")
+	}
+
+	return perms
+}
+
 // Matches checks if this permission matches the required permission
 // Handles wildcards (*) in either permission
 func (p *Permission) Matches(required *Permission) bool {
@@ -53,9 +84,41 @@ func (p *Permission) Matches(required *Permission) bool {
 		(p.Qualifier == "*" || required.Qualifier == "*" || p.Qualifier == required.Qualifier)
 }
 
+// checkPermissions checks if any of the user's permissions match the required permission
+// It first checks for explicit denials, then checks for allowed permissions including cascading
+func checkPermissions(requiredPerm *Permission, permissions map[string]string) error {
+	// First, check for explicit denials
+	// Generate all possible forms of the required permission
+	possiblePerms := requiredPerm.generateCascadingPermissions()
+
+	// Check if any of these forms are explicitly denied
+	for _, permStr := range possiblePerms {
+		if status, exists := permissions[permStr]; exists && status == "denied" {
+			return fmt.Errorf("permission explicitly denied: %s", permStr)
+		}
+	}
+
+	// Then check for allowed permissions
+	for permStr, status := range permissions {
+		if status != "allowed" {
+			continue
+		}
+
+		permObj, err := ParsePermission(permStr)
+		if err != nil {
+			continue // Skip invalid permissions
+		}
+
+		if permObj.Matches(requiredPerm) {
+			return nil // Permission granted
+		}
+	}
+
+	return fmt.Errorf("permission denied: required %s", requiredPerm)
+}
+
 // ValidatePermissions checks if the token has the required permission
 func (c *Client) ValidatePermissions(ctx context.Context, token, requiredPerm string) error {
-	// Parse the required permission once, as we'll use it for both cache and API flows
 	requiredPermObj, err := ParsePermission(requiredPerm)
 	if err != nil {
 		return fmt.Errorf("invalid required permission: %w", err)
@@ -63,29 +126,11 @@ func (c *Client) ValidatePermissions(ctx context.Context, token, requiredPerm st
 
 	// Check cache first
 	if permissions, exists := c.cache.Get(token); exists {
-		// Check cached permissions
-		for permStr, status := range permissions {
-			if status != "allowed" {
-				continue
-			}
-
-			permObj, err := ParsePermission(permStr)
-			if err != nil {
-				continue // Skip invalid permissions
-			}
-
-			if permObj.Matches(requiredPermObj) {
-				return nil // Permission granted from cache
-			}
-		}
-		// If we get here, cached permissions didn't match
-		return fmt.Errorf("permission denied (cached): required %s", requiredPerm)
+		return checkPermissions(requiredPermObj, permissions)
 	}
 
 	// Cache miss - fetch from auth service
 	var tokenInfo TokenInfo
-
-	// Execute the validation request through the circuit breaker
 	resp, err := c.breaker.Execute(func() (interface{}, error) {
 		resp, err := c.client.R().
 			SetContext(ctx).
@@ -107,46 +152,24 @@ func (c *Client) ValidatePermissions(ctx context.Context, token, requiredPerm st
 		return fmt.Errorf("failed to validate token: %w", err)
 	}
 
-	// Parse the response body
 	if err := json.Unmarshal(resp.([]byte), &tokenInfo); err != nil {
 		return fmt.Errorf("failed to parse token info: %w", err)
 	}
 
-	// Combine all permissions from all roles for caching
+	// Combine all permissions from all roles
 	allPermissions := make(map[string]string)
-	permissionGranted := false
-
-	// Check each role's permissions and build cache
 	for _, role := range tokenInfo.Roles {
 		for permStr, status := range role.Permissions {
-			// Add to combined permissions for cache
-			allPermissions[permStr] = status
-
-			// Skip if not allowed or already found a matching permission
-			if status != "allowed" || permissionGranted {
-				continue
-			}
-
-			// Parse the permission from the role
-			permObj, err := ParsePermission(permStr)
-			if err != nil {
-				continue // Skip invalid permissions
-			}
-
-			// Check if the permission matches the required one
-			if permObj.Matches(requiredPermObj) {
-				permissionGranted = true
-				// Don't return immediately - continue building cache
+			// In case of conflicts, denied takes precedence
+			if existing, exists := allPermissions[permStr]; !exists || existing != "denied" {
+				allPermissions[permStr] = status
 			}
 		}
 	}
 
-	// Cache the permissions regardless of the check result
+	// Cache the permissions
 	c.cache.Set(token, allPermissions)
 
-	if permissionGranted {
-		return nil
-	}
-
-	return fmt.Errorf("permission denied: required %s", requiredPerm)
+	// Check permissions with the combined set
+	return checkPermissions(requiredPermObj, allPermissions)
 }
