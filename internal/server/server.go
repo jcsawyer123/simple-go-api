@@ -9,24 +9,23 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"golang.org/x/sync/errgroup"
-
 	"github.com/jcsawyer123/simple-go-api/internal/auth"
 	"github.com/jcsawyer123/simple-go-api/internal/config"
 	"github.com/jcsawyer123/simple-go-api/internal/handlers"
-	"github.com/jcsawyer123/simple-go-api/internal/health"
+	"github.com/jcsawyer123/simple-go-api/internal/logger"
+	"golang.org/x/sync/errgroup"
 )
 
 type Server struct {
 	httpServer *http.Server
-	auth       *auth.Client
-	health     *health.HealthManager
+	router     *chi.Mux
+	auth       *auth.AuthClient
+	middleware *Middleware
+	handlers   *handlers.Handlers
 	bufPool    *sync.Pool
 }
 
 func New(cfg *config.Config) (*Server, error) {
-
 	// Create a buffer pool
 	bufPool := &sync.Pool{
 		New: func() interface{} {
@@ -34,67 +33,74 @@ func New(cfg *config.Config) (*Server, error) {
 		},
 	}
 
-	// Initialize the auth client
+	// Setup Auth Client
 	authClient, err := auth.NewClient(cfg.AuthServiceURL)
 	if err != nil {
 		return nil, fmt.Errorf("creating auth client: %w", err)
 	}
 
-	// Initialize the health manager
-	healthManager := health.NewHealthManager(5 * time.Minute)
-	healthManager.RegisterChecker("auth", authClient)
-
 	// Initialize the router
-	r := chi.NewRouter()
+	router := chi.NewRouter()
 
-	r.Use(middleware.RealIP)
-	r.Use(middleware.RequestID)
-	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(30 * time.Second))
-	r.Use(middleware.Logger)
+	// Create middleware manager
+	middleware := NewMiddleware(authClient)
 
-	h := handlers.New(authClient, healthManager)
+	// Initialize server
+	srv := &Server{
+		router:     router,
+		auth:       authClient,
+		middleware: middleware,
+		bufPool:    bufPool,
+		handlers:   handlers.New(authClient),
+	}
+	logger.Info().Msg("Server initialized")
 
-	r.Get("/health", h.HealthCheck)
-	r.Route("/api", func(r chi.Router) {
-		r.Use(h.AuthMiddleware)
-		r.Get("/data", func(w http.ResponseWriter, r *http.Request) {
-			buf := bufPool.Get().(*bytes.Buffer)
-			defer bufPool.Put(buf)
-			buf.Reset()
+	// Setup middleware and routes
+	srv.setupMiddleware()
+	srv.setupRoutes()
 
-			h.GetData(w, r, buf)
-		})
+	logger.Info().Msg("Server started")
 
+	// Setup HTTP server
+	srv.httpServer = &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           router,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		ReadHeaderTimeout: 2 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+
+	return srv, nil
+}
+
+func (s *Server) setupMiddleware() {
+	s.middleware.SetupGlobal(s.router)
+}
+
+func (s *Server) setupRoutes() {
+	s.router.Get("/health", s.handlers.HealthCheck)
+	s.router.Route("/api", func(r chi.Router) {
+		// Auth middleware for all /api routes
+		r.Use(s.middleware.Authenticate())
+
+		r.Get("/data", s.handlers.GetData)
+
+		// Permission-protected routes
 		r.Route("/perms", func(r chi.Router) {
-			r.Use(h.RequirePermissionsMiddleware("*:managed:*:*"))
-			r.Get("/test", h.TestPermissions)
+			r.Use(s.middleware.RequirePermissions(auth.MyServiceUpdatePerm))
+			r.Get("/test", s.handlers.TestPermissions)
 		})
 
-		r.With(h.RequirePermissionsMiddleware("*:managed:*:*")).
-			Get("/test", h.TestPermissions)
+		// Alternative permission middleware usage - instigator:*:disable:account has explicit deny
+		r.With(s.middleware.RequirePermissions(auth.InstigatorDisableAccountPerm)).
+			Get("/test", s.handlers.TestPermissions)
 	})
-
-	return &Server{
-		httpServer: &http.Server{
-			Addr:              ":" + cfg.Port,
-			Handler:           r,
-			ReadTimeout:       10 * time.Second,
-			WriteTimeout:      10 * time.Second,
-			IdleTimeout:       120 * time.Second,
-			ReadHeaderTimeout: 2 * time.Second,
-			MaxHeaderBytes:    1 << 20,
-		},
-		auth:    authClient,
-		health:  healthManager,
-		bufPool: bufPool,
-	}, nil
 }
 
 func (s *Server) Start(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
-
-	s.health.StartChecks(ctx)
 
 	g.Go(func() error {
 		if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {

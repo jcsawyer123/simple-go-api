@@ -2,33 +2,22 @@ package handlers
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/jcsawyer123/simple-go-api/internal/auth"
-	"github.com/jcsawyer123/simple-go-api/internal/health"
-)
-
-type ctxKey string
-
-const (
-	tokenCtxKey ctxKey = "token"
 )
 
 type Handlers struct {
-	auth    *auth.Client
-	health  *health.HealthManager
-	bufPool *sync.Pool // buffer pool for JSON encoding
+	auth    *auth.AuthClient // @TODO: Ensure interface is defined as we may replace this
+	bufPool *sync.Pool       // buffer pool for JSON encoding
 }
 
-func New(auth *auth.Client, health *health.HealthManager) *Handlers {
+func New(auth *auth.AuthClient) *Handlers {
 	return &Handlers{
-		auth:   auth,
-		health: health,
+		auth: auth,
 		bufPool: &sync.Pool{
 			New: func() interface{} {
 				return new(bytes.Buffer)
@@ -54,31 +43,20 @@ func (h *Handlers) writeJSON(w http.ResponseWriter, status int, v interface{}) e
 	return err
 }
 
-func (h *Handlers) HealthCheck(w http.ResponseWriter, r *http.Request) {
-	status := h.health.GetStatus()
-	isHealthy := h.health.IsHealthy()
-
+func (h *Handlers) GetData(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
-		"status": map[string]interface{}{
-			"healthy": isHealthy,
-			"checks":  status,
-		},
-		"version": "1.0.0",
+		"message":   "data endpoint",
+		"timestamp": time.Now().UTC(),
 	}
 
-	statusCode := http.StatusOK
-	if !isHealthy {
-		statusCode = http.StatusServiceUnavailable
-	}
-
-	if err := h.writeJSON(w, statusCode, response); err != nil {
+	if err := h.writeJSON(w, http.StatusOK, response); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 	}
 }
 
-func (h *Handlers) GetData(w http.ResponseWriter, r *http.Request, buf *bytes.Buffer) {
+func (h *Handlers) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
-		"message":   "data endpoint",
+		"message":   "healthcheck endpoint",
 		"timestamp": time.Now().UTC(),
 	}
 
@@ -93,59 +71,27 @@ type TestPermissionsResponse struct {
 }
 
 func (h *Handlers) TestPermissions(w http.ResponseWriter, r *http.Request) {
-	token, ok := r.Context().Value(tokenCtxKey).(string)
-	if !ok {
-		http.Error(w, "Internal server error - No token in context", http.StatusInternalServerError)
-		return
-	}
-
-	err := h.auth.ValidatePermissions(r.Context(), token, "*:managed:*:*")
 	response := TestPermissionsResponse{
-		HasPermission: err == nil,
+		HasPermission: true,
 		Message:       "Permission check completed",
 	}
-	if err != nil {
-		response.Message = fmt.Sprintf("Permission denied: %v", err)
-	}
-
-	if err := h.writeJSON(w, http.StatusOK, response); err != nil {
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
-	}
+	h.writeJSON(w, http.StatusOK, response)
 }
 
-func (h *Handlers) AuthMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := r.Header.Get("x-aims-auth-token")
-		if token == "" {
-			http.Error(w, "Unauthorized - No token provided", http.StatusUnauthorized)
-			return
-		}
-
-		if err := h.auth.ValidateToken(r.Context(), token); err != nil {
-			http.Error(w, "Unauthorized - Invalid token", http.StatusUnauthorized)
-			return
-		}
-
-		ctx := context.WithValue(r.Context(), tokenCtxKey, token)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+// responseWriter wraps http.ResponseWriter to capture the status code
+type responseWriter struct {
+	http.ResponseWriter
+	status int
 }
 
-func (h *Handlers) RequirePermissionsMiddleware(requiredPerm string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token, ok := r.Context().Value(tokenCtxKey).(string)
-			if !ok {
-				http.Error(w, "Unauthorized - No token in context", http.StatusUnauthorized)
-				return
-			}
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.status = code
+	rw.ResponseWriter.WriteHeader(code)
+}
 
-			if err := h.auth.ValidatePermissions(r.Context(), token, requiredPerm); err != nil {
-				http.Error(w, "Forbidden - Insufficient permissions", http.StatusForbidden)
-				return
-			}
-
-			next.ServeHTTP(w, r)
-		})
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	if rw.status == 0 {
+		rw.status = http.StatusOK
 	}
+	return rw.ResponseWriter.Write(b)
 }

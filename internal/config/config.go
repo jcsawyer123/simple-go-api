@@ -8,6 +8,7 @@ type Config struct {
 	SNSTopicARN    string
 	SQSQueueURL    string
 	AWSRegion      string
+	ProfilingPort  string
 }
 
 func Load() (*Config, error) {
@@ -17,6 +18,7 @@ func Load() (*Config, error) {
 		SNSTopicARN:    getEnvOrDefault("SNS_TOPIC_ARN", ""),
 		SQSQueueURL:    getEnvOrDefault("SQS_QUEUE_URL", ""),
 		AWSRegion:      getEnvOrDefault("AWS_REGION", "us-west-2"),
+		ProfilingPort:  getEnvOrDefault("PROFILING_PORT", "6060"),
 	}, nil
 }
 

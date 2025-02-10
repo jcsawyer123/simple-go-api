@@ -1,24 +1,8 @@
 package auth
 
 import (
-	"log"
-	"sync"
 	"time"
 )
-
-// CacheEntry represents a cached permission check result
-type CacheEntry struct {
-	permissions map[string]string
-	expiry      time.Time
-}
-
-// PermissionCache handles caching of token permissions
-type PermissionCache struct {
-	mu      sync.RWMutex
-	cache   map[string]CacheEntry
-	ttl     time.Duration
-	cleanup time.Duration
-}
 
 // NewPermissionCache creates a new cache with specified TTL
 func NewPermissionCache(ttl time.Duration) *PermissionCache {
@@ -59,9 +43,6 @@ func (pc *PermissionCache) Get(token string) (map[string]string, bool) {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
 
-	// Log if we hit the cache
-	log.Printf("Cache hit for token %s", token)
-
 	entry, exists := pc.cache[token]
 	if !exists {
 		return nil, false
@@ -69,8 +50,6 @@ func (pc *PermissionCache) Get(token string) (map[string]string, bool) {
 
 	// Check if the entry has expired
 	if entry.expiry.Before(time.Now()) {
-		// We could delete here, but we'll let the cleanup routine handle it
-		// to keep the read lock duration shorter
 		return nil, false
 	}
 
@@ -98,4 +77,32 @@ func (pc *PermissionCache) Set(token string, permissions map[string]string) {
 		permissions: permissionsCopy,
 		expiry:      time.Now().Add(pc.ttl),
 	}
+}
+
+// GetParsedPermission retrieves a parsed permission from cache
+func (pc *PermissionCache) GetParsedPermission(perm string) (*Permission, bool) {
+	if val, ok := pc.parsed.Load(perm); ok {
+		return val.(*Permission), true
+	}
+	return nil, false
+}
+
+// SetParsedPermission stores a parsed permission in cache
+func (pc *PermissionCache) SetParsedPermission(perm string, p *Permission) {
+	pc.parsed.Store(perm, p)
+}
+
+// GetOrParsePerm gets a permission from cache or parses it
+func (pc *PermissionCache) GetOrParsePerm(perm string) (*Permission, error) {
+	if p, ok := pc.GetParsedPermission(perm); ok {
+		return p, nil
+	}
+
+	p, err := ParsePermission(perm)
+	if err != nil {
+		return nil, err
+	}
+
+	pc.SetParsedPermission(perm, p)
+	return p, nil
 }

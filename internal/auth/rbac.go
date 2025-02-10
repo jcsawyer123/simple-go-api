@@ -1,104 +1,157 @@
 package auth
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
+
+	"github.com/jcsawyer123/simple-go-api/internal/logger"
 )
 
-type TokenInfo struct {
-	Roles []Role `json:"roles"`
-}
-
-type Role struct {
-	ID          string                 `json:"id"`
-	AccountID   string                 `json:"account_id"`
-	Name        string                 `json:"name"`
-	Permissions map[string]string      `json:"permissions"`
-	Version     int                    `json:"version"`
-	Created     map[string]interface{} `json:"created"`
-	Modified    map[string]interface{} `json:"modified"`
-}
-
-// Permission represents a structured form of a permission string
-type Permission struct {
-	Service   string // e.g., "*" or "compute"
-	Resource  string // e.g., "managed" or "own"
-	Action    string // e.g., "list" or "*"
-	Qualifier string // e.g., "*"
-}
+const (
+	MaxSections   = 5
+	WildcardValue = "*"
+)
 
 // ParsePermission converts a permission string into a structured Permission
 func ParsePermission(perm string) (*Permission, error) {
-	parts := strings.Split(perm, ":")
-	if len(parts) != 4 {
-		return nil, fmt.Errorf("invalid permission format: %s", perm)
+	if perm == WildcardValue {
+		return &Permission{
+			Sections:     [MaxSections]string{WildcardValue},
+			UsedSections: 1,
+			original:     WildcardValue,
+		}, nil
 	}
-	return &Permission{
-		Service:   parts[0],
-		Resource:  parts[1],
-		Action:    parts[2],
-		Qualifier: parts[3],
-	}, nil
+
+	parts := strings.Split(perm, ":")
+	if len(parts) > MaxSections {
+		logger.Warnf("permission has too many parts: %s", perm)
+		return nil, fmt.Errorf("invalid permission format (too many parts): %s", perm)
+	}
+	if len(parts) == 0 {
+		logger.Warnf("permission has no parts: %s", perm)
+		return nil, fmt.Errorf("invalid permission format (empty): %s", perm)
+	}
+
+	p := &Permission{
+		UsedSections: len(parts),
+		original:     perm,
+	}
+
+	// Fill the sections array
+	for i := 0; i < MaxSections; i++ {
+		if i < len(parts) {
+			// If part is empty string, keep it as empty
+			p.Sections[i] = parts[i]
+		} else {
+			// For unused sections, use wildcard
+			p.Sections[i] = WildcardValue
+		}
+	}
+
+	return p, nil
 }
 
-// generateCascadingPermissions generates all possible less specific permissions
-// For example: "compute:managed:list:prod" would generate:
-// ["compute:managed:list:prod", "compute:managed:list:*", "compute:managed:*:*", "compute:*:*:*", "*:*:*:*"]
-func (p *Permission) generateCascadingPermissions() []string {
-	var perms []string
-
-	// Add the original permission
-	perms = append(perms, fmt.Sprintf("%s:%s:%s:%s", p.Service, p.Resource, p.Action, p.Qualifier))
-
-	// Add cascading qualifier
-	if p.Qualifier != "*" {
-		perms = append(perms, fmt.Sprintf("%s:%s:%s:*", p.Service, p.Resource, p.Action))
+// String returns the string representation of the permission
+func (p *Permission) String() string {
+	if p.original != "" {
+		return p.original
 	}
 
-	// Add cascading action
-	if p.Action != "*" {
-		perms = append(perms, fmt.Sprintf("%s:%s:*:*", p.Service, p.Resource))
+	// Build string only up to used sections
+	parts := make([]string, p.UsedSections)
+
+	for i := 0; i < p.UsedSections; i++ {
+		parts[i] = p.Sections[i]
+	}
+	return strings.Join(parts, ":")
+}
+
+// isMoreSpecificThan checks if this permission is more specific than the other permission
+func (p *Permission) isMoreSpecificThan(other *Permission) bool {
+	// If other is "*", this is always more specific
+	if other.UsedSections == 1 && other.Sections[0] == WildcardValue {
+		return p.UsedSections > 1 || p.Sections[0] != WildcardValue
 	}
 
-	// Add cascading resource
-	if p.Resource != "*" {
-		perms = append(perms, fmt.Sprintf("%s:*:*:*", p.Service))
+	// If used sections are different, more sections is more specific
+	if p.UsedSections != other.UsedSections {
+		return p.UsedSections > other.UsedSections
 	}
 
-	// Add fully wildcarded permission
-	if p.Service != "*" {
-		perms = append(perms, "*:*:*:*")
+	// Count non-wildcards in used sections
+	pCount, oCount := 0, 0
+	for i := 0; i < p.UsedSections; i++ {
+		if p.Sections[i] != WildcardValue && p.Sections[i] != "" {
+			pCount++
+		}
+		if other.Sections[i] != WildcardValue && other.Sections[i] != "" {
+			oCount++
+		}
 	}
-
-	return perms
+	return pCount > oCount
 }
 
 // Matches checks if this permission matches the required permission
-// Handles wildcards (*) in either permission
 func (p *Permission) Matches(required *Permission) bool {
-	return (p.Service == "*" || required.Service == "*" || p.Service == required.Service) &&
-		(p.Resource == "*" || required.Resource == "*" || p.Resource == required.Resource) &&
-		(p.Action == "*" || required.Action == "*" || p.Action == required.Action) &&
-		(p.Qualifier == "*" || required.Qualifier == "*" || p.Qualifier == required.Qualifier)
+	// Fast path for exact matches
+	if p.original == required.original {
+		return true
+	}
+
+	// Fast path for single "*"
+	if (p.UsedSections == 1 && p.Sections[0] == WildcardValue) ||
+		(required.UsedSections == 1 && required.Sections[0] == WildcardValue) {
+		return true
+	}
+
+	// Compare sections
+	maxSections := p.UsedSections
+	if required.UsedSections > maxSections {
+		maxSections = required.UsedSections
+	}
+
+	for i := 0; i < maxSections; i++ {
+		pSection := p.Sections[i]
+		rSection := required.Sections[i]
+
+		// Handle empty sections as wildcards
+		if pSection == "" {
+			pSection = WildcardValue
+		}
+		if rSection == "" {
+			rSection = WildcardValue
+		}
+
+		// If neither is wildcard and they don't match, fail
+		if pSection != WildcardValue && rSection != WildcardValue && pSection != rSection {
+			return false
+		}
+	}
+
+	return true
 }
 
 // checkPermissions checks if any of the user's permissions match the required permission
-// It first checks for explicit denials, then checks for allowed permissions including cascading
 func checkPermissions(requiredPerm *Permission, permissions map[string]string) error {
-	// First, check for explicit denials
-	// Generate all possible forms of the required permission
-	possiblePerms := requiredPerm.generateCascadingPermissions()
+	// First check explicit denials
+	for permStr, status := range permissions {
+		if status != "denied" {
+			continue
+		}
 
-	// Check if any of these forms are explicitly denied
-	for _, permStr := range possiblePerms {
-		if status, exists := permissions[permStr]; exists && status == "denied" {
+		deniedPerm, err := ParsePermission(permStr)
+		if err != nil {
+			continue
+		}
+
+		if deniedPerm.Matches(requiredPerm) && !requiredPerm.isMoreSpecificThan(deniedPerm) {
 			return fmt.Errorf("permission explicitly denied: %s", permStr)
 		}
 	}
 
 	// Then check for allowed permissions
+	var allowedPerms []*Permission
 	for permStr, status := range permissions {
 		if status != "allowed" {
 			continue
@@ -106,70 +159,22 @@ func checkPermissions(requiredPerm *Permission, permissions map[string]string) e
 
 		permObj, err := ParsePermission(permStr)
 		if err != nil {
-			continue // Skip invalid permissions
+			continue
 		}
+		allowedPerms = append(allowedPerms, permObj)
+	}
 
+	// Sort by specificity
+	sort.Slice(allowedPerms, func(i, j int) bool {
+		return allowedPerms[i].isMoreSpecificThan(allowedPerms[j])
+	})
+
+	// Check permissions from most specific to least specific
+	for _, permObj := range allowedPerms {
 		if permObj.Matches(requiredPerm) {
 			return nil // Permission granted
 		}
 	}
 
 	return fmt.Errorf("permission denied: required %s", requiredPerm)
-}
-
-// ValidatePermissions checks if the token has the required permission
-func (c *Client) ValidatePermissions(ctx context.Context, token, requiredPerm string) error {
-	requiredPermObj, err := ParsePermission(requiredPerm)
-	if err != nil {
-		return fmt.Errorf("invalid required permission: %w", err)
-	}
-
-	// Check cache first
-	if permissions, exists := c.cache.Get(token); exists {
-		return checkPermissions(requiredPermObj, permissions)
-	}
-
-	// Cache miss - fetch from auth service
-	var tokenInfo TokenInfo
-	resp, err := c.breaker.Execute(func() (interface{}, error) {
-		resp, err := c.client.R().
-			SetContext(ctx).
-			SetHeader("x-aims-auth-token", token).
-			Get(c.baseURL + "/aims/v1/token_info")
-
-		if err != nil {
-			return nil, fmt.Errorf("auth request failed: %w", err)
-		}
-
-		if resp.StatusCode() != 200 {
-			return nil, fmt.Errorf("invalid token: status %d", resp.StatusCode())
-		}
-
-		return resp.Body(), nil
-	})
-
-	if err != nil {
-		return fmt.Errorf("failed to validate token: %w", err)
-	}
-
-	if err := json.Unmarshal(resp.([]byte), &tokenInfo); err != nil {
-		return fmt.Errorf("failed to parse token info: %w", err)
-	}
-
-	// Combine all permissions from all roles
-	allPermissions := make(map[string]string)
-	for _, role := range tokenInfo.Roles {
-		for permStr, status := range role.Permissions {
-			// In case of conflicts, denied takes precedence
-			if existing, exists := allPermissions[permStr]; !exists || existing != "denied" {
-				allPermissions[permStr] = status
-			}
-		}
-	}
-
-	// Cache the permissions
-	c.cache.Set(token, allPermissions)
-
-	// Check permissions with the combined set
-	return checkPermissions(requiredPermObj, allPermissions)
 }
