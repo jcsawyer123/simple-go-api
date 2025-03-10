@@ -1,28 +1,32 @@
 package auth
 
 import (
+	"context"
 	"time"
 )
 
 // NewPermissionCache creates a new cache with specified TTL
-func NewPermissionCache(ttl time.Duration) *PermissionCache {
+func NewPermissionCache(ctx context.Context, ttl time.Duration) *PermissionCache {
 	pc := &PermissionCache{
 		cache:   make(map[string]CacheEntry),
 		ttl:     ttl,
 		cleanup: ttl * 2,
 	}
 
-	go pc.startCleanup()
+	go pc.startCleanup(ctx)
 	return pc
 }
 
 // startCleanup periodically removes expired entries from the cache
-func (pc *PermissionCache) startCleanup() {
+func (pc *PermissionCache) startCleanup(ctx context.Context) {
 	ticker := time.NewTicker(pc.cleanup)
 	defer ticker.Stop()
 
 	for {
 		select {
+		case <-ctx.Done():
+			// Clean exit when context is cancelled
+			return
 		case <-ticker.C:
 			pc.mu.Lock()
 			now := time.Now()
@@ -39,7 +43,8 @@ func (pc *PermissionCache) startCleanup() {
 }
 
 // Get retrieves permissions from cache if they exist and haven't expired
-func (pc *PermissionCache) Get(token string) (map[string]string, bool) {
+func (pc *PermissionCache) Get(ctx context.Context, token string) (map[string]string, bool) {
+	// Can use context for logging, tracing, etc.
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
 
@@ -63,7 +68,7 @@ func (pc *PermissionCache) Get(token string) (map[string]string, bool) {
 }
 
 // Set stores permissions in cache with expiration time
-func (pc *PermissionCache) Set(token string, permissions map[string]string) {
+func (pc *PermissionCache) Set(ctx context.Context, token string, permissions map[string]string) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 

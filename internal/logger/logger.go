@@ -114,7 +114,7 @@ func Warnf(format string, v ...interface{}) {
 	logger.Warn().Msg(fmt.Sprintf(format, v...))
 }
 
-func WarnCTXf(ctx context.Context, format string, v ...interface{}) {
+func WarnfWCtx(ctx context.Context, format string, v ...interface{}) {
 	logger.Warn().Msg(getRequestID(ctx) + fmt.Sprintf(format, v...))
 }
 

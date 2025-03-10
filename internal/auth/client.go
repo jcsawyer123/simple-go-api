@@ -72,12 +72,12 @@ func (c *AuthClient) ValidatePermissions(ctx context.Context, token, requiredPer
 	}
 
 	// Check cache first
-	if permissions, exists := c.cache.Get(token); exists {
-		logger.InfofWCtx(context.Background(), "permission check hit cache")
+	if permissions, exists := c.cache.Get(ctx, token); exists {
+		logger.InfofWCtx(ctx, "permission check hit cache")
 		return checkPermissions(requiredPermObj, permissions)
 	}
 
-	logger.WarnCTXf(context.Background(), "permission check miss cache")
+	logger.WarnfWCtx(ctx, "permission check miss cache")
 
 	// Cache miss - fetch from auth service
 	var tokenInfo TokenInfo
@@ -118,7 +118,7 @@ func (c *AuthClient) ValidatePermissions(ctx context.Context, token, requiredPer
 	}
 
 	// Cache the permissions
-	c.cache.Set(token, allPermissions)
+	c.cache.Set(ctx, token, allPermissions)
 
 	// Check permissions with the combined set
 	return checkPermissions(requiredPermObj, allPermissions)

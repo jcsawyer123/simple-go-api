@@ -28,6 +28,7 @@ func (m *Middleware) Authenticate(next http.Handler) http.Handler {
 			return
 		}
 
+		// Add token to context
 		ctx := context.WithValue(r.Context(), TokenCtxKey, token)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -36,7 +37,7 @@ func (m *Middleware) Authenticate(next http.Handler) http.Handler {
 func (m *Middleware) RequirePermissions(requiredPerm string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token, ok := r.Context().Value(TokenCtxKey).(string)
+			token, ok := TokenFromContext(r.Context())
 			if !ok {
 				http.Error(w, "Unauthorized - No token in context", http.StatusUnauthorized)
 				return
