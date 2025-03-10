@@ -9,11 +9,19 @@ import (
 
 	"github.com/jcsawyer123/simple-go-api/internal/config"
 	"github.com/jcsawyer123/simple-go-api/internal/logger"
+	"github.com/jcsawyer123/simple-go-api/internal/metrics"
 	"github.com/jcsawyer123/simple-go-api/internal/profiling"
 	"github.com/jcsawyer123/simple-go-api/internal/server"
 )
 
 func main() {
+	// Load environment variables from .env files
+	if err := config.LoadEnv(); err != nil {
+		log.Printf("Warning: Failed to load .env file: %v", err)
+		// Continue execution - .env file is optional
+	}
+
+	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal(err)
@@ -38,6 +46,9 @@ func main() {
 		logger.Fatalf("Shutdown signal received")
 		cancel()
 	}()
+
+	// Clean up metrics on exit
+	defer metrics.CloseGlobal()
 
 	svc, err := server.New(cfg)
 	if err != nil {
