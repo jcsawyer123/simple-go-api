@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -62,6 +61,9 @@ func New(cfg *config.Config) (*Server, error) {
 
 	// Initialize the router
 	router := chi.NewRouter()
+
+	// Get the auth middleware from the client
+	authMiddleware := authClient.CreateMiddleware()
 
 	// Create middleware manager
 	middleware := NewMiddleware(authMiddleware)

@@ -4,14 +4,6 @@ import (
 	"time"
 )
 
-// ServiceType represents the type of authentication service
-type ServiceType string
-
-const (
-	ServiceTypeAims  ServiceType = "aims"
-	ServiceTypeLocal ServiceType = "local"
-)
-
 // BaseServiceConfig contains common configuration for auth services
 type BaseServiceConfig struct {
 	// Timeout is the request timeout duration
