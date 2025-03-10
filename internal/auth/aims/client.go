@@ -1,3 +1,4 @@
+// internal/auth/aims/client.go
 package aims
 
 import (
@@ -5,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"reflect"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -15,19 +15,6 @@ import (
 	"github.com/sony/gobreaker"
 )
 
-// Register the AIMS implementation with the auth factory
-func init() {
-	// Register a factory function for creating AIMS middleware
-	auth.RegisterMiddlewareFactory(reflect.TypeOf(&Client{}), func(service auth.Service) auth.Middleware {
-		// Cast to AIMS client
-		aimsClient := service.(*Client)
-		return NewMiddleware(aimsClient)
-	})
-}
-
-// Ensure Client implements the auth.Service interface
-var _ auth.Service = (*Client)(nil)
-
 // Client implements the auth.Service interface for AIMS authentication
 type Client struct {
 	baseURL   string
@@ -35,6 +22,9 @@ type Client struct {
 	breaker   *gobreaker.CircuitBreaker
 	permCache *PermissionCache
 }
+
+// Ensure Client implements the auth.Service interface
+var _ auth.Service = (*Client)(nil)
 
 // NewClient creates a new AIMS auth client with default settings
 func NewClient(baseURL string) (*Client, error) {
@@ -152,4 +142,9 @@ func (c *Client) ValidatePermissions(ctx context.Context, token, requiredPerm st
 
 	// Check permissions with the combined set
 	return CheckPermissions(requiredPermObj, allPermissions)
+}
+
+// CreateMiddleware returns a middleware for this client
+func (c *Client) CreateMiddleware() auth.Middleware {
+	return NewMiddleware(c)
 }

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -36,18 +35,16 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	// Setup Auth Client
-	authService, err := aims.NewClient(cfg.AuthServiceURL)
+	authClient, err := aims.NewClient(cfg.AuthServiceURL)
 	if err != nil {
 		return nil, fmt.Errorf("creating auth client: %w", err)
-	}
-	// Get the auth middleware
-	authMiddleware, err := auth.NewMiddleware(authService)
-	if err != nil {
-		log.Fatalf("Failed to create auth middleware: %v", err)
 	}
 
 	// Initialize the router
 	router := chi.NewRouter()
+
+	// Get the auth middleware from the client
+	authMiddleware := authClient.CreateMiddleware()
 
 	// Create middleware manager
 	middleware := NewMiddleware(authMiddleware)
@@ -55,10 +52,10 @@ func New(cfg *config.Config) (*Server, error) {
 	// Initialize server
 	srv := &Server{
 		router:     router,
-		auth:       authService,
+		auth:       authClient,
 		middleware: middleware,
 		bufPool:    bufPool,
-		handlers:   handlers.New(authService),
+		handlers:   handlers.New(authClient),
 	}
 	logger.Info().Msg("Server initialized")
 
