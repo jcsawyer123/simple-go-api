@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+      - "6060:6060"  # Expose profiling port
+    environment:
+      - PORT=8080
+      - AUTH_SERVICE_URL=https://api.product.dev.alertlogic.com
+      - AWS_REGION=us-west-2
+      - PROFILING_PORT=6060
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    volumes:
+      - /tmp/api-logs:/app/logs  # Mount a volume for logs if needed
+    networks:
+      - api-network
+
+  # Mock Auth Service for development (example)
+  # TODO: Implement a mock auth service
+  mock-auth:
+    image: wiremock/wiremock:2.35.0
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./wiremock:/home/wiremock
+    command: ["--verbose"]
+    networks:
+      - api-network
+
+networks:
+  api-network:
+    driver: bridge

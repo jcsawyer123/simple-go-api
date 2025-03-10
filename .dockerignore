@@ -1,0 +1,41 @@
+# Git
+.git/
+.gitignore
+
+# Build artifacts
+build/
+tmp/
+coverage.out
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Air live reload
+.air.toml
+tmp/
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Debug and profile data
+cpu.pprof
+mem.pprof
+trace.out
+
+# Documentation
+README.md
+PROFILING.md
+RATIONALE.md
+STEPS.md
+
+# Test data
+testdata/
+
+# Log files
+*.log
