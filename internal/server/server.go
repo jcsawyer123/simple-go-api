@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jcsawyer123/simple-go-api/internal/auth"
+	"github.com/jcsawyer123/simple-go-api/internal/auth/aims"
 	"github.com/jcsawyer123/simple-go-api/internal/config"
 	"github.com/jcsawyer123/simple-go-api/internal/handlers"
 	"github.com/jcsawyer123/simple-go-api/internal/logger"
@@ -19,7 +21,7 @@ import (
 type Server struct {
 	httpServer *http.Server
 	router     *chi.Mux
-	auth       *auth.AuthClient
+	auth       auth.Service
 	middleware *Middleware
 	handlers   *handlers.Handlers
 	bufPool    *sync.Pool
@@ -34,24 +36,29 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	// Setup Auth Client
-	authClient, err := auth.NewClient(cfg.AuthServiceURL)
+	authService, err := aims.NewClient(cfg.AuthServiceURL)
 	if err != nil {
 		return nil, fmt.Errorf("creating auth client: %w", err)
+	}
+	// Get the auth middleware
+	authMiddleware, err := auth.NewMiddleware(authService)
+	if err != nil {
+		log.Fatalf("Failed to create auth middleware: %v", err)
 	}
 
 	// Initialize the router
 	router := chi.NewRouter()
 
 	// Create middleware manager
-	middleware := NewMiddleware(authClient)
+	middleware := NewMiddleware(authMiddleware)
 
 	// Initialize server
 	srv := &Server{
 		router:     router,
-		auth:       authClient,
+		auth:       authService,
 		middleware: middleware,
 		bufPool:    bufPool,
-		handlers:   handlers.New(authClient),
+		handlers:   handlers.New(authService),
 	}
 	logger.Info().Msg("Server initialized")
 
@@ -76,7 +83,7 @@ func New(cfg *config.Config) (*Server, error) {
 }
 
 func (s *Server) setupMiddleware() {
-	s.middleware.SetupGlobal(s.router)
+	s.middleware.SetupGlobal(*s.router)
 }
 
 func (s *Server) setupRoutes() {
@@ -89,12 +96,12 @@ func (s *Server) setupRoutes() {
 
 		// Permission-protected routes
 		r.Route("/perms", func(r chi.Router) {
-			r.Use(s.middleware.RequirePermissions(auth.MyServiceUpdatePerm))
+			r.Use(s.middleware.RequirePermissions(aims.MyServiceUpdatePerm))
 			r.Get("/test", s.handlers.TestPermissions)
 		})
 
 		// Alternative permission middleware usage - instigator:*:disable:account has explicit deny
-		r.With(s.middleware.RequirePermissions(auth.InstigatorDisableAccountPerm)).
+		r.With(s.middleware.RequirePermissions(aims.InstigatorDisableAccountPerm)).
 			Get("/test", s.handlers.TestPermissions)
 	})
 }

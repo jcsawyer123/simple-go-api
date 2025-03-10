@@ -1,59 +1,53 @@
 package auth
 
 import (
-	"sync"
 	"time"
-
-	"github.com/go-resty/resty/v2"
-	"github.com/sony/gobreaker"
 )
 
-// TokenInfo represents the response from token validation
-type TokenInfo struct {
-	Roles []Role `json:"roles"`
+// ServiceType represents the type of authentication service
+type ServiceType string
+
+const (
+	ServiceTypeAims  ServiceType = "aims"
+	ServiceTypeLocal ServiceType = "local"
+)
+
+// BaseServiceConfig contains common configuration for auth services
+type BaseServiceConfig struct {
+	// Timeout is the request timeout duration
+	Timeout time.Duration
+	// RetryCount is the number of retry attempts
+	RetryCount int
+	// CacheTTL is the time-to-live for cached permissions
+	CacheTTL time.Duration
+	// CircuitBreakerMaxRequests is the maximum number of requests allowed when the circuit breaker is half-open
+	CircuitBreakerMaxRequests uint32
+	// CircuitBreakerTimeout is the timeout after which the circuit breaker will transition from open to half-open
+	CircuitBreakerTimeout time.Duration
+
+	CircuitBreakerFailureThreshold float64
 }
 
-// Role represents a user role with associated permissions
-type Role struct {
-	ID          string                 `json:"id"`
-	AccountID   string                 `json:"account_id"`
-	Name        string                 `json:"name"`
-	Permissions map[string]string      `json:"permissions"`
-	Version     int                    `json:"version"`
-	Created     map[string]interface{} `json:"created"`
-	Modified    map[string]interface{} `json:"modified"`
+// DefaultServiceConfig returns a BaseServiceConfig with sensible defaults
+func DefaultServiceConfig() BaseServiceConfig {
+	return BaseServiceConfig{
+		Timeout:                        5 * time.Second,
+		RetryCount:                     3,
+		CacheTTL:                       5 * time.Minute,
+		CircuitBreakerMaxRequests:      3,
+		CircuitBreakerTimeout:          10 * time.Second,
+		CircuitBreakerFailureThreshold: 0.6,
+	}
 }
 
-type Permission struct {
-	Sections     [MaxSections]string
-	UsedSections int
-	original     string
-}
-
-// AuthClient represents an auth client with caching capability
-type AuthClient struct {
-	baseURL string
-	client  *resty.Client
-	breaker *gobreaker.CircuitBreaker
-	cache   *PermissionCache
-}
-
-// CircuitBreaker interface for circuit breaking functionality
-type CircuitBreaker interface {
-	Execute(func() (interface{}, error)) (interface{}, error)
-}
-
-// CacheEntry represents a cached permission check result
-type CacheEntry struct {
-	permissions map[string]string
-	expiry      time.Time
-}
-
-// PermissionCache handles caching of token permissions
-type PermissionCache struct {
-	mu      sync.RWMutex
-	cache   map[string]CacheEntry
-	ttl     time.Duration
-	cleanup time.Duration
-	parsed  sync.Map // Cache for parsed permissions
+// AuthResult represents the result of an authentication check
+type AuthResult struct {
+	// Authenticated indicates if the authentication was successful
+	Authenticated bool
+	// Error provides information about authentication failures
+	Error error
+	// Permissions contains the user's permissions (format depends on implementation)
+	Permissions interface{}
+	// Metadata contains additional auth-related information
+	Metadata map[string]interface{}
 }

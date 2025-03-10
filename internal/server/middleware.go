@@ -10,16 +10,18 @@ import (
 )
 
 type Middleware struct {
-	auth *auth.Middleware
+	auth auth.Middleware
 }
 
-func NewMiddleware(authClient *auth.AuthClient) *Middleware {
+// NewMiddleware creates a server middleware with the provided auth middleware
+func NewMiddleware(authMiddleware auth.Middleware) *Middleware {
 	return &Middleware{
-		auth: auth.NewMiddleware(authClient),
+		auth: authMiddleware,
 	}
 }
 
-func (m *Middleware) SetupGlobal(r *chi.Mux) {
+// SetupGlobal sets up global middleware for the router
+func (m *Middleware) SetupGlobal(r chi.Mux) {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)

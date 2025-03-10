@@ -1,21 +1,46 @@
-package auth
+package aims
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"reflect"
 	"time"
 
 	"github.com/go-resty/resty/v2"
+	"github.com/jcsawyer123/simple-go-api/internal/auth"
+	"github.com/jcsawyer123/simple-go-api/internal/auth/cache"
 	"github.com/jcsawyer123/simple-go-api/internal/logger"
 	"github.com/sony/gobreaker"
 )
 
-// NewClient creates a new auth client
-func NewClient(baseURL string) (*AuthClient, error) {
+// Register the AIMS implementation with the auth factory
+func init() {
+	// Register a factory function for creating AIMS middleware
+	auth.RegisterMiddlewareFactory(reflect.TypeOf(&Client{}), func(service auth.Service) auth.Middleware {
+		// Cast to AIMS client
+		aimsClient := service.(*Client)
+		return NewMiddleware(aimsClient)
+	})
+}
+
+// Ensure Client implements the auth.Service interface
+var _ auth.Service = (*Client)(nil)
+
+// Client implements the auth.Service interface for AIMS authentication
+type Client struct {
+	baseURL   string
+	client    *resty.Client
+	breaker   *gobreaker.CircuitBreaker
+	permCache *PermissionCache
+}
+
+// NewClient creates a new AIMS auth client with default settings
+func NewClient(baseURL string) (*Client, error) {
+	// Create circuit breaker
 	cb := gobreaker.NewCircuitBreaker(gobreaker.Settings{
-		Name:        "auth-service",
+		Name:        "aims-auth-service",
 		MaxRequests: 3,
 		Interval:    0,
 		Timeout:     10 * time.Second,
@@ -28,30 +53,35 @@ func NewClient(baseURL string) (*AuthClient, error) {
 		},
 	})
 
+	// Create HTTP client
 	client := resty.New().
 		SetTimeout(5 * time.Second).
 		SetRetryCount(3).
 		SetRetryWaitTime(100 * time.Millisecond).
 		SetRetryMaxWaitTime(2 * time.Second)
 
-	return &AuthClient{
-		baseURL: baseURL,
-		client:  client,
-		breaker: cb,
-		cache:   NewPermissionCache(5 * time.Minute),
+	// Create cache
+	memCache := cache.NewMemoryCache(5 * time.Minute)
+	permCache := NewPermissionCache(memCache)
+
+	return &Client{
+		baseURL:   baseURL,
+		client:    client,
+		breaker:   cb,
+		permCache: permCache,
 	}, nil
 }
 
-// ValidateToken validates a token against the auth service
-func (c *AuthClient) ValidateToken(ctx context.Context, token string) error {
+// ValidateToken validates a token against the AIMS auth service
+func (c *Client) ValidateToken(ctx context.Context, token string) error {
 	_, err := c.breaker.Execute(func() (interface{}, error) {
 		resp, err := c.client.R().
 			SetContext(ctx).
-			SetHeader("x-aims-auth-token", token).
+			SetHeader(AimsHeaderName, token).
 			Get(c.baseURL + "/aims/v1/token_info")
 
 		if err != nil {
-			return nil, fmt.Errorf("auth request failed: %w", err)
+			return nil, fmt.Errorf("aims auth request failed: %w", err)
 		}
 
 		if resp.StatusCode() != 200 {
@@ -65,16 +95,16 @@ func (c *AuthClient) ValidateToken(ctx context.Context, token string) error {
 }
 
 // ValidatePermissions checks if the token has the required permission
-func (c *AuthClient) ValidatePermissions(ctx context.Context, token, requiredPerm string) error {
-	requiredPermObj, err := c.cache.GetOrParsePerm(requiredPerm)
+func (c *Client) ValidatePermissions(ctx context.Context, token, requiredPerm string) error {
+	requiredPermObj, err := c.permCache.GetOrParsePerm(requiredPerm)
 	if err != nil {
 		return fmt.Errorf("invalid required permission: %w", err)
 	}
 
 	// Check cache first
-	if permissions, exists := c.cache.Get(ctx, token); exists {
+	if permissions, exists := c.permCache.GetPermissions(token); exists {
 		logger.InfofWCtx(ctx, "permission check hit cache")
-		return checkPermissions(requiredPermObj, permissions)
+		return CheckPermissions(requiredPermObj, permissions)
 	}
 
 	logger.WarnfWCtx(ctx, "permission check miss cache")
@@ -84,11 +114,11 @@ func (c *AuthClient) ValidatePermissions(ctx context.Context, token, requiredPer
 	resp, err := c.breaker.Execute(func() (interface{}, error) {
 		resp, err := c.client.R().
 			SetContext(ctx).
-			SetHeader("x-aims-auth-token", token).
+			SetHeader(AimsHeaderName, token).
 			Get(c.baseURL + "/aims/v1/token_info")
 
 		if err != nil {
-			return nil, fmt.Errorf("auth request failed: %w", err)
+			return nil, fmt.Errorf("aims auth request failed: %w", err)
 		}
 
 		if resp.StatusCode() != 200 {
@@ -118,8 +148,8 @@ func (c *AuthClient) ValidatePermissions(ctx context.Context, token, requiredPer
 	}
 
 	// Cache the permissions
-	c.cache.Set(ctx, token, allPermissions)
+	c.permCache.SetPermissions(token, allPermissions)
 
 	// Check permissions with the combined set
-	return checkPermissions(requiredPermObj, allPermissions)
+	return CheckPermissions(requiredPermObj, allPermissions)
 }

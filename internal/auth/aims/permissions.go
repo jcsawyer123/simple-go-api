@@ -1,17 +1,32 @@
-package auth
+package aims
 
 import (
 	"fmt"
 	"sort"
 	"strings"
-
-	"github.com/jcsawyer123/simple-go-api/internal/logger"
 )
 
 const (
-	MaxSections   = 5
+	// MaxSections is the maximum number of sections in a permission string
+	MaxSections = 5
+
+	// WildcardValue represents the wildcard permission symbol
 	WildcardValue = "*"
+
+	// AimsHeaderName is the header name for AIMS tokens
+	AimsHeaderName = "x-aims-auth-token"
+
+	// Common AIMS permission constants
+	MyServiceUpdatePerm          = "myservice:managed:update:*"
+	InstigatorDisableAccountPerm = "instigator:*:disable:account"
 )
+
+// Permission represents a structured AIMS permission with sections
+type Permission struct {
+	Sections     [MaxSections]string
+	UsedSections int
+	original     string
+}
 
 // ParsePermission converts a permission string into a structured Permission
 func ParsePermission(perm string) (*Permission, error) {
@@ -25,11 +40,9 @@ func ParsePermission(perm string) (*Permission, error) {
 
 	parts := strings.Split(perm, ":")
 	if len(parts) > MaxSections {
-		logger.Warnf("permission has too many parts: %s", perm)
 		return nil, fmt.Errorf("invalid permission format (too many parts): %s", perm)
 	}
 	if len(parts) == 0 {
-		logger.Warnf("permission has no parts: %s", perm)
 		return nil, fmt.Errorf("invalid permission format (empty): %s", perm)
 	}
 
@@ -132,8 +145,8 @@ func (p *Permission) Matches(required *Permission) bool {
 	return true
 }
 
-// checkPermissions checks if any of the user's permissions match the required permission
-func checkPermissions(requiredPerm *Permission, permissions map[string]string) error {
+// CheckPermissions checks if any of the user's permissions match the required permission
+func CheckPermissions(requiredPerm *Permission, permissions map[string]string) error {
 	// First check explicit denials
 	for permStr, status := range permissions {
 		if status != "denied" {

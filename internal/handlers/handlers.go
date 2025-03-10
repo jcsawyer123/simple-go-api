@@ -11,11 +11,11 @@ import (
 )
 
 type Handlers struct {
-	auth    *auth.AuthClient // @TODO: Ensure interface is defined as we may replace this
-	bufPool *sync.Pool       // buffer pool for JSON encoding
+	auth    auth.Service
+	bufPool *sync.Pool // buffer pool for JSON encoding
 }
 
-func New(auth *auth.AuthClient) *Handlers {
+func New(auth auth.Service) *Handlers {
 	return &Handlers{
 		auth: auth,
 		bufPool: &sync.Pool{
